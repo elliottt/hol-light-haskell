@@ -8,12 +8,14 @@ module Hol where
 import Error
 
 import Control.Applicative (Applicative)
-import Control.Concurrent (MVar,newMVar,takeMVar,putMVar,modifyMVar,readMVar)
+import Control.Concurrent
+    (MVar,newMVar,takeMVar,putMVar,modifyMVar,readMVar,modifyMVar_)
 import Control.DeepSeq (NFData(rnf))
-import Data.List (find,delete,union)
-import Data.Maybe (fromMaybe)
+import Data.List (find,delete,union,nub)
+import Data.Maybe (fromMaybe,isJust)
 import Data.Typeable (Typeable,cast)
 import MonadLib
+import qualified Data.Set as Set
 
 
 -- HOL Monad -------------------------------------------------------------------
@@ -52,11 +54,21 @@ runHol m = do
 -- Environment -----------------------------------------------------------------
 
 data RO = RO
-  { roAxioms :: MVar [Theorem]
+  { roAxioms     :: MVar [Theorem]
+  , roTermDefs   :: MVar [Theorem]
+  , roTermConsts :: MVar [(String,Type)]
   }
 
 initRO :: IO RO
-initRO  = RO `fmap` newMVar []
+initRO  = RO
+   `fmap` newMVar []             -- axioms
+     `ap` newMVar []             -- term defs
+     `ap` newMVar initTermConsts -- term consts
+
+initTermConsts :: [(String,Type)]
+initTermConsts  =
+  [ ("=", introArrow tya (introArrow tya tybool))
+  ]
 
 newAxiom :: Term -> Hol Theorem
 newAxiom tm = do
@@ -70,6 +82,43 @@ getAxioms :: Hol [Theorem]
 getAxioms  = Hol $ do
   ro <- ask
   inBase (readMVar (roAxioms ro))
+
+newConstant :: String -> Type -> Hol ()
+newConstant n ty = do
+  ro     <- Hol ask
+  consts <- inBase (readMVar (roTermConsts ro))
+  if isJust (lookup n consts)
+     then fail ("newConstant: constant " ++ n ++ " is already declared")
+     else inBase (modifyMVar_ (roTermConsts ro) (\cs -> return ((n,ty):cs)))
+
+getConstant :: String -> Hol Type
+getConstant n = do
+  ro     <- Hol ask
+  consts <- inBase (readMVar (roTermConsts ro))
+  case lookup n consts of
+    Nothing -> fail ("getConstant: " ++ n ++ " not declared")
+    Just ty -> return ty
+
+getConstants :: Hol [(String,Type)]
+getConstants  = Hol $ do
+  ro <- ask
+  inBase (readMVar (roTermConsts ro))
+
+newBasicDefinition :: Term -> Hol Theorem
+newBasicDefinition tm = do
+  (l,r)      <- destEq tm
+  (cname,ty) <- destVar l
+  unless (freesin [] r)
+    (fail "newBasicDefinition: term not closed")
+  unless (freeTypeVars r `Set.isSubsetOf` freeTypeVars ty)
+    (fail "newBasicDefinition: type variables not reflected in constant")
+  newConstant cname ty
+  let c = Con cname ty
+  eq <- introEq c r
+  let thm = Sequent emptyAssumps eq
+  Hol $ do
+    ro <- ask
+    inBase (modifyMVar (roTermDefs ro) (\defs -> return (thm:defs,thm)))
 
 
 -- Exceptions ------------------------------------------------------------------
@@ -158,6 +207,12 @@ frees tm@Con{}     = []
 frees tm@(Abs v b) = delete v (frees b)
 frees tm@(App f x) = union (frees f) (frees x)
 
+freesin :: [Term] -> Term -> Bool
+freesin acc tm@Var{}  = elem tm acc
+freesin acc tm@Con{}  = True
+freesin acc (Abs v b) = freesin (v:acc) b
+freesin acc (App s t) = freesin acc s && freesin acc t
+
 destVar :: Term -> Hol (String,Type)
 destVar (Var s ty) = return (s,ty)
 destVar _          = fail "destVar"
@@ -169,6 +224,33 @@ destApp _         = fail "destApp"
 destAbs :: Term -> Hol (Term,Term)
 destAbs (Abs v t) = return (v,t)
 destAbs _         = fail "destAbs"
+
+rator :: Term -> Hol Term
+rator tm = fst `fmap` destApp tm
+  `onError` fail "rator: not an application"
+
+rand :: Term -> Hol Term
+rand tm = snd `fmap` destApp tm
+  `onError` fail "rand: not an application"
+
+
+-- Free Type Variables ---------------------------------------------------------
+
+class FreeTypeVars a where
+  freeTypeVars :: a -> Set.Set Type
+
+instance FreeTypeVars a => FreeTypeVars [a] where
+  freeTypeVars = Set.unions . map freeTypeVars
+
+instance FreeTypeVars Type where
+  freeTypeVars (TApp _ ts) = freeTypeVars ts
+  freeTypeVars var@TVar{}  = Set.singleton var
+
+instance FreeTypeVars Term where
+  freeTypeVars (Var _ ty) = freeTypeVars ty
+  freeTypeVars (Con _ ty) = freeTypeVars ty
+  freeTypeVars (Abs v t)  = freeTypeVars v `Set.union` freeTypeVars t
+  freeTypeVars (App f x)  = freeTypeVars f `Set.union` freeTypeVars x
 
 
 -- Substitution ----------------------------------------------------------------
@@ -364,13 +446,16 @@ termImage f as =
 -- | Sequents.
 data Sequent a c = Sequent
   { seqAssumps :: Assumps a
-  , seqConseq  :: c
+  , seqConcl   :: c
   } deriving Show
 
 instance (NFData a, NFData c) => NFData (Sequent a c) where
   rnf (Sequent as c) = rnf as `seq` rnf c
 
 type Theorem = Sequent Term Term
+
+destTheorem :: Theorem -> Hol (Assumps Term, Term)
+destTheorem (Sequent as c) = return (as,c)
 
 printTheorem :: Theorem -> IO ()
 printTheorem (Sequent as c) = putStrLn (unlines (fas ++ [l,fc]))
@@ -386,8 +471,8 @@ introEq x y = do
 
 destEq :: Term -> Hol (Term,Term)
 destEq t = do
-  (r,y) <- destApp t
-  (_,x) <- destApp r
+  (r,y) <- destApp t `onError` fail "destEq"
+  (_,x) <- destApp r `onError` fail "destEq"
   return (x,y)
 
 -- | REFL
@@ -400,8 +485,8 @@ refl' t = Sequent emptyAssumps `fmap` introEq t t
 -- | TRANS
 trans :: Theorem -> Theorem -> Hol Theorem
 trans ab bc = do
-  (a,b)  <- destEq (seqConseq ab)
-  (b',c) <- destEq (seqConseq bc)
+  (a,b)  <- destEq (seqConcl ab) `onError` fail "trans"
+  (b',c) <- destEq (seqConcl bc) `onError` fail "trans"
   unless (b == b') (fail "trans")
   eq'    <- introEq a c
   return (Sequent (merge (seqAssumps ab) (seqAssumps bc)) eq')
@@ -409,8 +494,8 @@ trans ab bc = do
 -- | MK_COMB
 apply :: Theorem -> Theorem -> Hol Theorem
 apply f x = do
-  (s,t) <- destEq (seqConseq f)
-  (u,v) <- destEq (seqConseq x)
+  (s,t) <- destEq (seqConcl f)
+  (u,v) <- destEq (seqConcl x)
   (a,b) <- destArrow =<< typeOf s
   a'    <- typeOf u
   unless (a == a') (fail "apply: types to not agree")
@@ -426,7 +511,7 @@ abstract a t = do
 abstract' :: Term -> Theorem -> Hol Theorem
 abstract' v t = do
   _     <- destVar v
-  (l,r) <- destEq (seqConseq t)
+  (l,r) <- destEq (seqConcl t)
   Sequent (seqAssumps t) `fmap` introEq (Abs v l) (Abs v r)
 
 -- | BETA
@@ -450,28 +535,28 @@ assume' t = do
 -- | EQ_MP
 eqMP :: Theorem -> Theorem -> Hol Theorem
 eqMP eq c = do
-  (l,r) <- destApp (seqConseq eq)
-  unless (l == seqConseq c) (fail "eqMP")
+  (l,r) <- destApp (seqConcl eq)
+  unless (l == seqConcl c) (fail "eqMP")
   return (Sequent (merge (seqAssumps eq) (seqAssumps c)) r)
 
 -- | DEDUCT_ANTISYM_RULE
 deductAntisymRule :: Theorem -> Theorem -> Hol Theorem
 deductAntisymRule a b = do
-  let aas = termRemove (seqConseq b) (seqAssumps a)
-      bas = termRemove (seqConseq a) (seqAssumps b)
-  eq <- introEq (seqConseq a) (seqConseq b)
+  let aas = termRemove (seqConcl b) (seqAssumps a)
+      bas = termRemove (seqConcl a) (seqAssumps b)
+  eq <- introEq (seqConcl a) (seqConcl b)
   return (Sequent (merge aas bas) eq)
 
 -- | INST_TYPE
 instType :: TypeSubst -> Theorem -> Hol Theorem
 instType theta t =
-  Sequent `fmap` termImage instFn (seqAssumps t) `ap` instFn (seqConseq t)
+  Sequent `fmap` termImage instFn (seqAssumps t) `ap` instFn (seqConcl t)
   where
   instFn = typeInst theta
 
 -- | INST_TERM
 instTerm :: TermSubst -> Theorem -> Hol Theorem
 instTerm theta t =
-  Sequent `fmap` termImage instFn (seqAssumps t) `ap` instFn (seqConseq t)
+  Sequent `fmap` termImage instFn (seqAssumps t) `ap` instFn (seqConcl t)
   where
   instFn = termSubst theta

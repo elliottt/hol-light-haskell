@@ -65,3 +65,10 @@ catchE m h = do
       case fromError se of
         Nothing -> raise se
         Just e  -> h e
+
+canE :: RunExceptionM m SomeError => (a -> m b) -> a -> m Bool
+canE f x = do
+  res <- try (f x)
+  case res of
+    Right _ -> return True
+    Left _  -> return False
