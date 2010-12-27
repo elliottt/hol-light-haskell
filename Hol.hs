@@ -26,13 +26,6 @@ instance Monad Hol where
   m >>= k  = Hol (getHol m >>= getHol . k)
   fail msg = raiseE (Fail msg)
 
-runHol :: Hol a -> IO (Either SomeError a)
-runHol m = do
-  res <- runExceptionT $ runStateT initialContext $ getHol m
-  case res of
-    Left se     -> return (Left se)
-    Right (a,_) -> return (Right a)
-
 instance StateM Hol Context where
   get = Hol   get
   set = Hol . set
@@ -42,6 +35,16 @@ instance ExceptionM Hol SomeError where
 
 instance RunExceptionM Hol SomeError where
   try = Hol . try . getHol
+
+instance BaseM Hol IO where
+  inBase = Hol . inBase
+
+runHol :: Hol a -> IO (Either SomeError a)
+runHol m = do
+  res <- runExceptionT $ runStateT initialContext $ getHol m
+  case res of
+    Left se     -> return (Left se)
+    Right (a,_) -> return (Right a)
 
 
 -- Exceptions ------------------------------------------------------------------
