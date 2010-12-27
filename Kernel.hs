@@ -114,12 +114,14 @@ destEq t = do
   (_,x) <- destApp r
   return (x,y)
 
+-- | REFL
 refl :: TermRep a => a -> Hol Theorem
 refl = refl' <=< termRep
 
 refl' :: Term -> Hol Theorem
 refl' t = Sequent emptyAssumps `fmap` introEq t t
 
+-- | TRANS
 trans :: Theorem -> Theorem -> Hol Theorem
 trans ab bc = do
   (a,b)  <- destEq (seqConseq ab)
@@ -128,6 +130,7 @@ trans ab bc = do
   eq'    <- introEq a c
   return (Sequent (merge (seqAssumps ab) (seqAssumps bc)) eq')
 
+-- | MK_COMB
 apply :: Theorem -> Theorem -> Hol Theorem
 apply f x = do
   (s,t) <- destEq (seqConseq f)
@@ -138,6 +141,7 @@ apply f x = do
   Sequent (merge (seqAssumps f) (seqAssumps x))
       `fmap` introEq (App s u) (App t v)
 
+-- | ABS
 abstract :: TermRep a => a -> Theorem -> Hol Theorem
 abstract a t = do
   tm <- termRep a
@@ -149,6 +153,7 @@ abstract' v t = do
   (l,r) <- destEq (seqConseq t)
   Sequent (seqAssumps t) `fmap` introEq (Abs v l) (Abs v r)
 
+-- | BETA
 beta :: Term -> Hol Theorem
 beta t = do
   (f,x) <- destApp t
@@ -156,6 +161,7 @@ beta t = do
   unless (v == x) (fail "beta: not a trivial beta-redex")
   Sequent emptyAssumps `fmap` introEq t b
 
+-- | ASSUME
 assume :: TermRep a => a -> Hol Theorem
 assume  = assume' <=< termRep
 
@@ -165,12 +171,14 @@ assume' t = do
   unless (ty == tybool) (fail "assume: not a proposition")
   return (Sequent (Assumps [t]) t)
 
+-- | EQ_MP
 eqMP :: Theorem -> Theorem -> Hol Theorem
 eqMP eq c = do
   (l,r) <- destApp (seqConseq eq)
   unless (l == seqConseq c) (fail "eqMP")
   return (Sequent (merge (seqAssumps eq) (seqAssumps c)) r)
 
+-- | DEDUCT_ANTISYM_RULE
 deductAntisymRule :: Theorem -> Theorem -> Hol Theorem
 deductAntisymRule a b = do
   let aas = termRemove (seqConseq b) (seqAssumps a)
@@ -178,12 +186,14 @@ deductAntisymRule a b = do
   eq <- introEq (seqConseq a) (seqConseq b)
   return (Sequent (merge aas bas) eq)
 
+-- | INST_TYPE
 instType :: TypeSubst -> Theorem -> Hol Theorem
 instType theta t =
   Sequent `fmap` termImage instFn (seqAssumps t) `ap` instFn (seqConseq t)
   where
   instFn = typeInst theta
 
+-- | INST_TERM
 instTerm :: TermSubst -> Theorem -> Hol Theorem
 instTerm theta t =
   Sequent `fmap` termImage instFn (seqAssumps t) `ap` instFn (seqConseq t)
