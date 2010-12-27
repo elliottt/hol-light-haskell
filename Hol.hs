@@ -8,6 +8,7 @@ module Hol where
 import Error
 
 import Control.Applicative (Applicative)
+import Control.Concurrent (MVar,newMVar,takeMVar,putMVar,modifyMVar,readMVar)
 import Control.DeepSeq (NFData(rnf))
 import Data.List (find,delete,union)
 import Data.Maybe (fromMaybe)
@@ -18,7 +19,7 @@ import MonadLib
 -- HOL Monad -------------------------------------------------------------------
 
 newtype Hol a = Hol
-  { getHol :: StateT Context (ExceptionT SomeError IO) a
+  { getHol :: ReaderT RO (StateT Context (ExceptionT SomeError IO)) a
   } deriving (Functor,Applicative)
 
 instance Monad Hol where
@@ -41,10 +42,34 @@ instance BaseM Hol IO where
 
 runHol :: Hol a -> IO (Either SomeError a)
 runHol m = do
-  res <- runExceptionT $ runStateT initialContext $ getHol m
+  ro  <- initRO
+  res <- runExceptionT $ runStateT initialContext $ runReaderT ro $ getHol m
   case res of
     Left se     -> return (Left se)
     Right (a,_) -> return (Right a)
+
+
+-- Environment -----------------------------------------------------------------
+
+data RO = RO
+  { roAxioms :: MVar [Theorem]
+  }
+
+initRO :: IO RO
+initRO  = RO `fmap` newMVar []
+
+newAxiom :: Term -> Hol Theorem
+newAxiom tm = do
+  ty <- typeOf tm
+  unless (ty == tybool) (fail "newAxiom: Not a proposition")
+  ro <- Hol ask
+  let thm = Sequent emptyAssumps tm
+  inBase (modifyMVar (roAxioms ro) (\ axioms -> return (thm:axioms,thm)))
+
+getAxioms :: Hol [Theorem]
+getAxioms  = Hol $ do
+  ro <- ask
+  inBase (readMVar (roAxioms ro))
 
 
 -- Exceptions ------------------------------------------------------------------
@@ -293,7 +318,7 @@ instance TermRep Bool where
 -- | Assumptions
 newtype Assumps a = Assumps
   { getAssumps :: [a]
-  } deriving (Eq,NFData)
+  } deriving (Eq,Show,NFData)
 
 emptyAssumps :: Assumps a
 emptyAssumps  = Assumps []
@@ -340,7 +365,7 @@ termImage f as =
 data Sequent a c = Sequent
   { seqAssumps :: Assumps a
   , seqConseq  :: c
-  }
+  } deriving Show
 
 instance (NFData a, NFData c) => NFData (Sequent a c) where
   rnf (Sequent as c) = rnf as `seq` rnf c
