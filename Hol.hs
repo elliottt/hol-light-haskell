@@ -1,10 +1,11 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleContexts #-}
 
 module Hol where
+
+import Error
 
 import Control.Applicative (Applicative)
 import Control.DeepSeq (NFData(rnf))
@@ -14,51 +15,10 @@ import Data.Typeable (Typeable,cast)
 import MonadLib
 
 
--- Errors ----------------------------------------------------------------------
-
-class (Show e, Typeable e) => Error e where
-  toError :: e -> SomeError
-  toError  = SomeError
-  fromError :: SomeError -> Maybe e
-  fromError (SomeError se) = cast se
-
-data SomeError = forall e. (Show e, Typeable e) => SomeError e
-    deriving Typeable
-
-instance Error SomeError where
-  toError   = id
-  fromError = Just
-
-instance Show SomeError where
-  showsPrec p (SomeError e)
-    | p > 10    = showChar '(' . body . showChar ')'
-    | otherwise = body
-    where
-    body = showString "SomeError " . showsPrec 11 e
-
-raiseE :: (ExceptionM m SomeError, Error e) => e -> m a
-raiseE  = raise . toError
-
-tryE :: (RunExceptionM m SomeError, Error e) => m a -> m (Either e a)
-tryE m = do
-  res <- try m
-  case res of
-    Right a -> return (Right a)
-    Left se ->
-      case fromError se of
-        Nothing -> raise se
-        Just e  -> return (Left e)
-
-data Fail = Fail String
-    deriving (Show,Typeable)
-
-instance Error Fail
-
-
 -- HOL Monad -------------------------------------------------------------------
 
 newtype Hol a = Hol
-  { getHol :: ExceptionT SomeError (StateT Context Lift) a
+  { getHol :: StateT Context (ExceptionT SomeError IO) a
   } deriving (Functor,Applicative)
 
 instance Monad Hol where
@@ -66,8 +26,12 @@ instance Monad Hol where
   m >>= k  = Hol (getHol m >>= getHol . k)
   fail msg = raiseE (Fail msg)
 
-runHol :: Hol a -> Either SomeError a
-runHol m = fst $ runLift $ runStateT initialContext $ runExceptionT $ getHol m
+runHol :: Hol a -> IO (Either SomeError a)
+runHol m = do
+  res <- runExceptionT $ runStateT initialContext $ getHol m
+  case res of
+    Left se     -> return (Left se)
+    Right (a,_) -> return (Right a)
 
 instance StateM Hol Context where
   get = Hol   get
@@ -78,6 +42,22 @@ instance ExceptionM Hol SomeError where
 
 instance RunExceptionM Hol SomeError where
   try = Hol . try . getHol
+
+
+-- Exceptions ------------------------------------------------------------------
+
+-- | What happens when you call fail from the Hol Monad.
+data Fail = Fail String
+    deriving (Show,Typeable)
+
+instance Error Fail
+
+
+-- | Variable name clash during typeInst.
+data Clash = Clash Term
+    deriving (Show,Typeable)
+
+instance Error Clash
 
 
 -- Types and Terms -------------------------------------------------------------
@@ -237,11 +217,6 @@ variant avoid v
 
 
 -- Type Instantiation ----------------------------------------------------------
-
-data Clash = Clash Term
-    deriving (Show,Typeable)
-
-instance Error Clash
 
 typeInst :: TypeSubst -> Term -> Hol Term
 typeInst env0
