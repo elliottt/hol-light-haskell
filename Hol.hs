@@ -217,6 +217,10 @@ destVar :: Term -> Hol (String,Type)
 destVar (Var s ty) = return (s,ty)
 destVar _          = fail "destVar"
 
+destCon :: Term -> Hol (String,Type)
+destCon (Con s ty) = return (s,ty)
+destCon _          = fail "destCon"
+
 destApp :: Term -> Hol (Term,Term)
 destApp (App f x) = return (f,x)
 destApp _         = fail "destApp"
@@ -232,6 +236,20 @@ rator tm = fst `fmap` destApp tm
 rand :: Term -> Hol Term
 rand tm = snd `fmap` destApp tm
   `onError` fail "rand: not an application"
+
+introEq :: Term -> Term -> Hol Term
+introEq x y = do
+  ty <- typeOf x
+  return (App (App (Con "=" (introArrow ty (introArrow ty tybool))) x) y)
+
+destEq :: Term -> Hol (Term,Term)
+destEq t = body `onError` fail "destEq"
+  where
+  body = do
+    (r,y) <- destApp t
+    (c,x) <- destApp r
+    (s,_) <- destCon c
+    return (x,y)
 
 -- | Lift haskell values into their term representation.
 class TermRep a where
@@ -342,8 +360,8 @@ termImage f as =
 
 -- | Sequents.
 data Sequent a c = Sequent
-  { seqAssumps :: Assumps a
-  , seqConcl   :: c
+  { seqHyps  :: Assumps a
+  , seqConcl :: c
   } deriving Show
 
 instance (NFData a, NFData c) => NFData (Sequent a c) where
@@ -361,17 +379,6 @@ printTheorem (Sequent as c) = putStrLn (unlines (fas ++ [l,fc]))
   fc  = formatTerm c
   l   = replicate (length (maximum (fc:fas))) '='
 
-introEq :: Term -> Term -> Hol Term
-introEq x y = do
-  ty <- typeOf x
-  return (App (App (Con "=" (introArrow ty (introArrow ty tybool))) x) y)
-
-destEq :: Term -> Hol (Term,Term)
-destEq t = do
-  (r,y) <- destApp t `onError` fail "destEq"
-  (_,x) <- destApp r `onError` fail "destEq"
-  return (x,y)
-
 -- | REFL
 refl :: TermRep a => a -> Hol Theorem
 refl = refl' <=< termRep
@@ -386,7 +393,7 @@ trans ab bc = do
   (b',c) <- destEq (seqConcl bc) `onError` fail "trans"
   unless (b == b') (fail "trans")
   eq'    <- introEq a c
-  return (Sequent (merge (seqAssumps ab) (seqAssumps bc)) eq')
+  return (Sequent (merge (seqHyps ab) (seqHyps bc)) eq')
 
 -- | MK_COMB
 apply :: Theorem -> Theorem -> Hol Theorem
@@ -396,7 +403,7 @@ apply f x = do
   (a,b) <- destArrow =<< typeOf s
   a'    <- typeOf u
   unless (a == a') (fail "apply: types to not agree")
-  Sequent (merge (seqAssumps f) (seqAssumps x))
+  Sequent (merge (seqHyps f) (seqHyps x))
       `fmap` introEq (App s u) (App t v)
 
 -- | ABS
@@ -409,7 +416,7 @@ abstract' :: Term -> Theorem -> Hol Theorem
 abstract' v t = do
   _     <- destVar v
   (l,r) <- destEq (seqConcl t)
-  Sequent (seqAssumps t) `fmap` introEq (Abs v l) (Abs v r)
+  Sequent (seqHyps t) `fmap` introEq (Abs v l) (Abs v r)
 
 -- | BETA
 beta :: Term -> Hol Theorem
@@ -434,26 +441,26 @@ eqMP :: Theorem -> Theorem -> Hol Theorem
 eqMP eq c = do
   (l,r) <- destApp (seqConcl eq)
   unless (l == seqConcl c) (fail "eqMP")
-  return (Sequent (merge (seqAssumps eq) (seqAssumps c)) r)
+  return (Sequent (merge (seqHyps eq) (seqHyps c)) r)
 
 -- | DEDUCT_ANTISYM_RULE
 deductAntisymRule :: Theorem -> Theorem -> Hol Theorem
 deductAntisymRule a b = do
-  let aas = termRemove (seqConcl b) (seqAssumps a)
-      bas = termRemove (seqConcl a) (seqAssumps b)
+  let aas = termRemove (seqConcl b) (seqHyps a)
+      bas = termRemove (seqConcl a) (seqHyps b)
   eq <- introEq (seqConcl a) (seqConcl b)
   return (Sequent (merge aas bas) eq)
 
 -- | INST_TYPE
 instType :: TypeSubst -> Theorem -> Hol Theorem
 instType theta t =
-  Sequent `fmap` termImage instFn (seqAssumps t) `ap` instFn (seqConcl t)
+  Sequent `fmap` termImage instFn (seqHyps t) `ap` instFn (seqConcl t)
   where
   instFn = typeInst theta
 
 -- | INST_TERM
 instTerm :: TermSubst -> Theorem -> Hol Theorem
 instTerm theta t =
-  Sequent `fmap` termImage instFn (seqAssumps t) `ap` instFn (seqConcl t)
+  Sequent `fmap` termImage instFn (seqHyps t) `ap` instFn (seqConcl t)
   where
   instFn = termSubst theta
