@@ -6,6 +6,10 @@
 module Hol where
 
 import Error
+import Hol.Assumps
+import Hol.Subst
+import Hol.Term
+import Hol.Type
 
 import Control.Applicative (Applicative)
 import Control.Concurrent
@@ -168,15 +172,6 @@ instance Error Clash
 
 -- Types and Terms -------------------------------------------------------------
 
-data Type
-  = TVar String
-  | TApp String [Type]
-    deriving (Eq,Ord,Show)
-
-instance NFData Type where
-  rnf (TVar s)    = rnf s
-  rnf (TApp s ts) = rnf s `seq` rnf ts
-
 mkType :: String -> [Type] -> Hol Type
 mkType op args = do
   arity <- getTypeArity op
@@ -194,54 +189,15 @@ destArrow :: Type -> Hol (Type,Type)
 destArrow (TApp "->" [a,b]) = return (a,b)
 destArrow _                 = fail "destArrow"
 
+-- | Eliminate a type application.
 destTApp :: Type -> Hol (String,[Type])
 destTApp (TApp n ts) = return (n,ts)
 destTApp _           = fail "destTApp"
 
+-- | Eliminate a type variable.
 destTVar :: Type -> Hol String
 destTVar (TVar n) = return n
 destTVar _        = fail "destTVar"
-
-tya :: Type
-tya  = TVar "a"
-
-tybool :: Type
-tybool  = TApp "bool" []
-
-data Term
-  = Var String Type
-  | Con String Type
-  | App Term Term
-  | Abs Term Term
-    deriving (Eq,Ord,Show)
-
-instance NFData Term where
-  rnf (Var s ty) = rnf s `seq` rnf ty
-  rnf (Con s ty) = rnf s `seq` rnf ty
-  rnf (App f x)  = rnf f `seq` rnf x
-  rnf (Abs v b)  = rnf v `seq` rnf b
-
-
--- | Lift haskell values into their term representation.
-class TermRep a where
-  termRep  :: a -> Hol Term
-  termType :: a -> Hol Type
-
-instance TermRep Term where
-  termRep  = return
-  termType = typeOf
-
-instance TermRep Bool where
-  termRep True  = return (Con "T" tybool)
-  termRep False = return (Con "F" tybool)
-  termType _    = return tybool
-
-
-formatTerm :: Term -> String
-formatTerm (Var n ty)  = n
-formatTerm (Con n ty)  = n
-formatTerm (App f x)   = formatTerm f ++ " " ++ formatTerm x
-formatTerm (Abs n b) = '\\' : formatTerm n ++ '.' : formatTerm b
 
 -- | Get the type of a term.
 typeOf :: Term -> Hol Type
@@ -256,23 +212,6 @@ typeOf (App f x)  = do
   (a,b) <- destArrow fty
   unless (a == xty) (fail "typeOf")
   return b
-
-varFreeIn :: Term -> Term -> Bool
-varFreeIn v (Abs bv b) = v /= bv && varFreeIn v b
-varFreeIn v (App f x)  = varFreeIn v f || varFreeIn v x
-varFreeIn v v'         = v /= v'
-
-frees :: Term -> [Term]
-frees tm@Var{}     = [tm]
-frees tm@Con{}     = []
-frees tm@(Abs v b) = delete v (frees b)
-frees tm@(App f x) = union (frees f) (frees x)
-
-freesin :: [Term] -> Term -> Bool
-freesin acc tm@Var{}  = elem tm acc
-freesin acc tm@Con{}  = True
-freesin acc (Abs v b) = freesin (v:acc) b
-freesin acc (App s t) = freesin acc s && freesin acc t
 
 destVar :: Term -> Hol (String,Type)
 destVar (Var s ty) = return (s,ty)
@@ -294,60 +233,22 @@ rand :: Term -> Hol Term
 rand tm = snd `fmap` destApp tm
   `onError` fail "rand: not an application"
 
+-- | Lift haskell values into their term representation.
+class TermRep a where
+  termRep  :: a -> Hol Term
+  termType :: a -> Hol Type
 
--- Free Type Variables ---------------------------------------------------------
+instance TermRep Term where
+  termRep  = return
+  termType = typeOf
 
-class FreeTypeVars a where
-  freeTypeVars :: a -> Set.Set Type
-
-instance FreeTypeVars a => FreeTypeVars [a] where
-  freeTypeVars = Set.unions . map freeTypeVars
-
-instance FreeTypeVars Type where
-  freeTypeVars (TApp _ ts) = freeTypeVars ts
-  freeTypeVars var@TVar{}  = Set.singleton var
-
-instance FreeTypeVars Term where
-  freeTypeVars (Var _ ty) = freeTypeVars ty
-  freeTypeVars (Con _ ty) = freeTypeVars ty
-  freeTypeVars (Abs v t)  = freeTypeVars v `Set.union` freeTypeVars t
-  freeTypeVars (App f x)  = freeTypeVars f `Set.union` freeTypeVars x
+instance TermRep Bool where
+  termRep True  = return (Con "T" tybool)
+  termRep False = return (Con "F" tybool)
+  termType _    = return tybool
 
 
 -- Substitution ----------------------------------------------------------------
-
-newtype Subst a = Subst
-  { getSubst :: [(a,a)]
-  } deriving (Eq,Show)
-
-emptySubst :: Subst a
-emptySubst  = Subst []
-
-nullSubst :: Subst a -> Bool
-nullSubst (Subst u) = null u
-
-extendSubst :: a -> a -> Subst a -> Subst a
-extendSubst a a' (Subst u) = Subst ((a,a'):u)
-
-anySubst :: (a -> a -> Bool) -> Subst a -> Bool
-anySubst p (Subst u) = any (uncurry p) u
-
-allSubst :: (a -> a -> Bool) -> Subst a -> Bool
-allSubst p (Subst u) = all (uncurry p) u
-
--- | Filter the substitution.
-filterSubst :: (a -> a -> Bool) -> Subst a -> Subst a
-filterSubst p (Subst u) = Subst (filter (uncurry p) u)
-
-lookupSubst :: Eq a => a -> Subst a -> Maybe a
-lookupSubst n (Subst env) = snd `fmap` find p env
-  where
-  p (t,_) = n == t
-
-lookupSubstR :: Eq a => a -> Subst a -> Maybe a
-lookupSubstR n (Subst env) = fst `fmap` find p env
-  where
-  p (_,x) = n == x
 
 type TypeSubst = Subst Type
 
@@ -424,40 +325,6 @@ typeInst env0
 
 
 -- Assumptions -----------------------------------------------------------------
-
-newtype Assumps a = Assumps
-  { getAssumps :: [a]
-  } deriving (Eq,Show,NFData)
-
-emptyAssumps :: Assumps a
-emptyAssumps  = Assumps []
-
-unconsAssumps :: Assumps a -> Maybe (a,Assumps a)
-unconsAssumps (Assumps (a:as)) = Just (a,Assumps as)
-unconsAssumps _                = Nothing
-
-consAssumps :: a -> Assumps a -> Assumps a
-consAssumps a (Assumps as) = Assumps (a:as)
-
-merge :: (NFData a, Ord a) => Assumps a -> Assumps a -> Assumps a
-merge (Assumps as0) (Assumps bs0) = Assumps (loop as0 bs0)
-  where
-  loop as       [] = as
-  loop []       bs = bs
-  loop l@(a:as) r@(b:bs)
-    | a == b    = a : loop as bs
-    | a < b     = a : loop as r
-    | otherwise = b : loop l  bs
-
-
-termRemove :: (NFData a, Ord a) => a -> Assumps a -> Assumps a
-termRemove a (Assumps as) = Assumps (loop as)
-  where
-  loop [] = []
-  loop l@(x:xs)
-    | a > x     = x : loop xs
-    | a == x    = xs
-    | otherwise = l
 
 termImage :: (NFData a, Ord a) => (a -> Hol a) -> Assumps a -> Hol (Assumps a)
 termImage f as =
