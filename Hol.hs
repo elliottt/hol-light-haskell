@@ -21,17 +21,13 @@ import qualified Data.Set as Set
 -- HOL Monad -------------------------------------------------------------------
 
 newtype Hol a = Hol
-  { getHol :: ReaderT RO (StateT Context (ExceptionT SomeError IO)) a
+  { getHol :: ReaderT RO (ExceptionT SomeError IO) a
   } deriving (Functor,Applicative)
 
 instance Monad Hol where
   return x = Hol (return x)
   m >>= k  = Hol (getHol m >>= getHol . k)
   fail msg = raiseE (Fail msg)
-
-instance StateM Hol Context where
-  get = Hol   get
-  set = Hol . set
 
 instance ExceptionM Hol SomeError where
   raise = Hol . raise
@@ -45,10 +41,7 @@ instance BaseM Hol IO where
 runHol :: Hol a -> IO (Either SomeError a)
 runHol m = do
   ro  <- initRO
-  res <- runExceptionT $ runStateT initialContext $ runReaderT ro $ getHol m
-  case res of
-    Left se     -> return (Left se)
-    Right (a,_) -> return (Right a)
+  runExceptionT $ runReaderT ro $ getHol m
 
 
 -- Environment -----------------------------------------------------------------
@@ -57,6 +50,7 @@ data RO = RO
   { roAxioms     :: MVar [Theorem]
   , roTermDefs   :: MVar [Theorem]
   , roTermConsts :: MVar [(String,Type)]
+  , roTypes      :: MVar [(String,Int)]
   }
 
 initRO :: IO RO
@@ -64,11 +58,40 @@ initRO  = RO
    `fmap` newMVar []             -- axioms
      `ap` newMVar []             -- term defs
      `ap` newMVar initTermConsts -- term consts
+     `ap` newMVar initTypes      -- type airitys
 
 initTermConsts :: [(String,Type)]
 initTermConsts  =
   [ ("=", introArrow tya (introArrow tya tybool))
   ]
+
+initTypes :: [(String,Int)]
+initTypes  =
+  [ ("bool", 0)
+  , ("->", 2)
+  ]
+
+getTypes :: Hol [(String,Int)]
+getTypes  = Hol $ do
+  ro <- ask
+  inBase (readMVar (roTypes ro))
+
+getTypeArity :: String -> Hol Int
+getTypeArity s = Hol $ do
+  ro    <- ask
+  types <- inBase (readMVar (roTypes ro))
+  case lookup s types of
+    Nothing -> fail ("getTypeArity: " ++ s ++ " not declared")
+    Just a  -> return a
+
+newType :: String -> Int -> Hol ()
+newType n a = do
+  types <- getTypes
+  when (isJust (lookup n types))
+    (fail ("newType: " ++ n ++ " already declared"))
+  Hol $ do
+    ro <- ask
+    inBase (modifyMVar_ (roTypes ro) (\ts -> return ((n,a):ts)))
 
 newAxiom :: Term -> Hol Theorem
 newAxiom tm = do
@@ -85,11 +108,12 @@ getAxioms  = Hol $ do
 
 newConstant :: String -> Type -> Hol ()
 newConstant n ty = do
-  ro     <- Hol ask
-  consts <- inBase (readMVar (roTermConsts ro))
-  if isJust (lookup n consts)
-     then fail ("newConstant: constant " ++ n ++ " is already declared")
-     else inBase (modifyMVar_ (roTermConsts ro) (\cs -> return ((n,ty):cs)))
+  consts <- getConstants
+  when (isJust (lookup n consts))
+    (fail ("newConstant: constant " ++ n ++ " is already declared"))
+  Hol $ do
+    ro <- ask
+    inBase (modifyMVar_ (roTermConsts ro) (\cs -> return ((n,ty):cs)))
 
 getConstant :: String -> Hol Type
 getConstant n = do
@@ -103,6 +127,11 @@ getConstants :: Hol [(String,Type)]
 getConstants  = Hol $ do
   ro <- ask
   inBase (readMVar (roTermConsts ro))
+
+getDefinitions :: Hol [Theorem]
+getDefinitions  = Hol $ do
+  ro <- ask
+  inBase (readMVar (roTermDefs ro))
 
 newBasicDefinition :: Term -> Hol Theorem
 newBasicDefinition tm = do
@@ -148,6 +177,14 @@ instance NFData Type where
   rnf (TVar s)    = rnf s
   rnf (TApp s ts) = rnf s `seq` rnf ts
 
+mkType :: String -> [Type] -> Hol Type
+mkType op args = do
+  arity <- getTypeArity op
+    `onError` fail ("mkType: " ++ op ++ " is not defined")
+  unless (arity == length args)
+    (fail ("mkType: wrong number of arguments to " ++ op))
+  return (TApp op args)
+
 -- | Introduce an arrow type.
 introArrow :: Type -> Type -> Type
 introArrow a b = TApp "->" [a,b]
@@ -156,6 +193,14 @@ introArrow a b = TApp "->" [a,b]
 destArrow :: Type -> Hol (Type,Type)
 destArrow (TApp "->" [a,b]) = return (a,b)
 destArrow _                 = fail "destArrow"
+
+destTApp :: Type -> Hol (String,[Type])
+destTApp (TApp n ts) = return (n,ts)
+destTApp _           = fail "destTApp"
+
+destTVar :: Type -> Hol String
+destTVar (TVar n) = return n
+destTVar _        = fail "destTVar"
 
 tya :: Type
 tya  = TVar "a"
@@ -175,6 +220,22 @@ instance NFData Term where
   rnf (Con s ty) = rnf s `seq` rnf ty
   rnf (App f x)  = rnf f `seq` rnf x
   rnf (Abs v b)  = rnf v `seq` rnf b
+
+
+-- | Lift haskell values into their term representation.
+class TermRep a where
+  termRep  :: a -> Hol Term
+  termType :: a -> Hol Type
+
+instance TermRep Term where
+  termRep  = return
+  termType = typeOf
+
+instance TermRep Bool where
+  termRep True  = return (Con "T" tybool)
+  termRep False = return (Con "F" tybool)
+  termType _    = return tybool
+
 
 formatTerm :: Term -> String
 formatTerm (Var n ty)  = n
@@ -362,42 +423,8 @@ typeInst env0
           body e tye (Abs z t')
 
 
--- Contexts --------------------------------------------------------------------
+-- Assumptions -----------------------------------------------------------------
 
-newtype Context = Context { constants :: [(String,Type)] }
-
-initialContext :: Context
-initialContext  = Context
-  [ ("=", introArrow tya (introArrow tya tybool))
-  ]
-
-lookupConstType :: String -> Context -> Maybe Type
-lookupConstType n = lookup n . constants
-
-getConstType :: String -> Hol Type
-getConstType n = do
-  cxt <- get
-  case lookupConstType n cxt of
-    Nothing -> fail ("getConstType: " ++ n)
-    Just ty -> return ty
-
-
--- | Lift haskell values into their term representation.
-class TermRep a where
-  termRep  :: a -> Hol Term
-  termType :: a -> Hol Type
-
-instance TermRep Term where
-  termRep  = return
-  termType = typeOf
-
-instance TermRep Bool where
-  termRep True  = return (Con "T" tybool)
-  termRep False = return (Con "F" tybool)
-  termType _    = return tybool
-
-
--- | Assumptions
 newtype Assumps a = Assumps
   { getAssumps :: [a]
   } deriving (Eq,Show,NFData)
@@ -442,6 +469,9 @@ termImage f as =
       if h == h' && tl == tl'
          then return as
          else return (merge (consAssumps h' emptyAssumps) tl')
+
+
+-- Operations ------------------------------------------------------------------
 
 -- | Sequents.
 data Sequent a c = Sequent
