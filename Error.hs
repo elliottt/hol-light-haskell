@@ -42,3 +42,26 @@ tryE m = do
       case fromError se of
         Nothing -> raise se
         Just e  -> return (Left e)
+
+onError :: RunExceptionM m SomeError => m a -> m b -> m a
+onError m h = do
+  res <- tryE m
+  case res of
+    Right a -> return a
+    Left se -> h >> raise se
+
+finallyE :: RunExceptionM m SomeError => m a -> m b -> m a
+finallyE m end = do
+  res <- m `onError` end
+  end
+  return res
+
+catchE :: (RunExceptionM m SomeError, Error e) => m a -> (e -> m a) -> m a
+catchE m h = do
+  res <- tryE m
+  case res of
+    Right a -> return a
+    Left se ->
+      case fromError se of
+        Nothing -> raise se
+        Just e  -> h e
