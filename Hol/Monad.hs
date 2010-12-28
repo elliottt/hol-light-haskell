@@ -428,9 +428,8 @@ rMK_COMB f x = do
   (u,v) <- destEq (seqConcl x)
   (a,b) <- destArrow =<< typeOf s
   a'    <- typeOf u
-  unless (a == a') (fail "apply: types to not agree")
-  Sequent (merge (seqHyps f) (seqHyps x))
-      `fmap` introEq (App s u) (App t v)
+  unless (a == a') (fail "MK_COMB: types to not agree")
+  Sequent (merge (seqHyps f) (seqHyps x)) `fmap` introEq (App s u) (App t v)
 
 -- | ABS
 rABS :: TermRep a => a -> Theorem -> Hol Theorem
@@ -465,8 +464,8 @@ rASSUME' t = do
 -- | EQ_MP
 rEQ_MP :: Theorem -> Theorem -> Hol Theorem
 rEQ_MP eq c = do
-  (l,r) <- destApp (seqConcl eq)
-  unless (l == seqConcl c) (fail "eqMP")
+  (l,r) <- destEq (seqConcl eq)
+  unless (alphaCompare l (seqConcl c) == EQ) (fail "EQ_MP")
   return (Sequent (merge (seqHyps eq) (seqHyps c)) r)
 
 -- | DEDUCT_ANTISYM_RULE

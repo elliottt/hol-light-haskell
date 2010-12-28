@@ -7,11 +7,12 @@ import Hol.Subst
 import Hol.Term
 
 import Control.Monad ((>=>),when,(<=<))
+import MonadLib
 
 
 type Conv = Term -> Hol Theorem
 
-rBETA_CONV :: Term -> Hol Theorem
+rBETA_CONV :: Conv
 rBETA_CONV tm =
   rBETA tm `onError` body `onError` fail "betaConv: Not a beta-redex"
   where
@@ -35,13 +36,14 @@ rSYM th = do
   let tm = seqConcl th
   (l,r) <- destEq tm
   lth   <- rREFL l
-  rrtm <- rator =<< rator tm
-  f    <- rAP_TERM rrtm th
-  app  <- rMK_COMB f lth
+  rrtm  <- rator =<< rator tm
+  f     <- rAP_TERM rrtm th
+  app   <- rMK_COMB f lth
   rEQ_MP app lth
 
+-- | Succeeds when two terms are alpha-convertible.
 rALPHA :: Term -> Term -> Hol Theorem
-rALPHA tm1 tm2 = body `onError` fail "cALPHA"
+rALPHA tm1 tm2 = body `onError` fail "ALPHA"
   where
   body = do
     tm1' <- rREFL tm1
