@@ -239,6 +239,34 @@ rTOP_SWEEP_QCONV c =
           (rSUB_QCONV (rTOP_SWEEP_QCONV c))
 
 
+-- Apply at leaves of op-tree --------------------------------------------------
+
+-- XXX: there must be a better way to formulate this.  Using case seems not
+-- quite as elegant as it could be.
+rDEPTH_BINOP_CONV :: Term -> Conv -> Conv
+rDEPTH_BINOP_CONV op c tm =
+  case tm of
+    App (App op' l) r | op == op' -> do
+      (l,r) <- destBinop op tm
+      lth   <- rDEPTH_BINOP_CONV op c l
+      rth   <- rDEPTH_BINOP_CONV op c r
+      l'    <- rAP_TERM op' lth
+      rMK_COMB l' rth
+
+    _ -> c tm
+
+
+rPATH_CONV :: String -> Conv -> Conv
+rPATH_CONV s c =
+  case s of
+    []    -> c
+    'l':t -> rRATOR_CONV (rPATH_CONV t c)
+    'r':t -> rRAND_CONV  (rPATH_CONV t c)
+    _  :t -> rABS_CONV   (rPATH_CONV t c)
+
+rPAT_CONV :: Term -> Conv -> Conv
+rPAT_CONV  = fail "rPAT_CONV: not implemented"
+
 -- Conversion To A Rule---------------------------------------------------------
 
 rCONV_RULE :: Conv -> Theorem -> Hol Theorem

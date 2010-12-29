@@ -33,6 +33,10 @@ instance Monad Hol where
   m >>= k  = Hol (getHol m >>= getHol . k)
   fail msg = raiseE (Fail msg)
 
+instance MonadPlus Hol where
+  mzero = raiseE Empty
+  mplus = onError
+
 instance ExceptionM Hol SomeError where
   raise = Hol . raise
 
@@ -179,6 +183,13 @@ data Clash = Clash Term
 instance Error Clash
 
 
+-- | An empty result
+data Empty = Empty
+    deriving (Show,Typeable)
+
+instance Error Empty
+
+
 -- Types and Terms -------------------------------------------------------------
 
 mkType :: String -> [Type] -> Hol Type
@@ -291,6 +302,7 @@ mkApp f x = do
   ty <- typeOf f
   _  <- destArrow ty `onError` fail "mkApp"
   return (App f x)
+
 
 -- Substitution ----------------------------------------------------------------
 
