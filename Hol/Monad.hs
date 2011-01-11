@@ -144,19 +144,28 @@ getDefinitions  = Hol $ do
 
 newBasicDefinition :: Term -> Hol Theorem
 newBasicDefinition tm = do
-  (l,r)      <- destEq tm
-  (cname,ty) <- destVar l
-  unless (freesin [] r)
-    (fail "newBasicDefinition: term not closed")
-  unless (freeTypeVars r `Set.isSubsetOf` freeTypeVars ty)
-    (fail "newBasicDefinition: type variables not reflected in constant")
-  newConstant cname ty
-  let c = Con cname ty
-  eq <- introEq c r
-  let thm = Sequent emptyAssumps eq
-  Hol $ do
-    ro <- ask
-    inBase (modifyMVar (roTermDefs ro) (\defs -> return (thm:defs,thm)))
+  (cname,ty,r) <- intro `onError` fail "newBasicDefinition"
+  body cname ty r
+
+  where
+
+  intro = do
+    (l,r)      <- destEq tm
+    (cname,ty) <- destVar l
+    return (cname,ty,r)
+
+  body cname ty r = do
+    unless (freesin [] r)
+      (fail "newBasicDefinition: term not closed")
+    unless (freeTypeVars r `Set.isSubsetOf` freeTypeVars ty)
+      (fail "newBasicDefinition: type variables not reflected in constant")
+    newConstant cname ty
+    let c = Con cname ty
+    eq <- introEq c r
+    let thm = Sequent emptyAssumps eq
+    Hol $ do
+      ro <- ask
+      inBase (modifyMVar (roTermDefs ro) (\defs -> return (thm:defs,thm)))
 
 -- | Generate a (probably) fresh variable.
 genVar :: Type -> Hol Term
